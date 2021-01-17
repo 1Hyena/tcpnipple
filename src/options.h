@@ -17,6 +17,7 @@ class OPTIONS {
       , exit_flag       (      0)
       , supply_port     (      0)
       , demand_port     (      0)
+      , connections     (      1)
       , name            (     "")
       , version         (version)
       , logfrom         (log_src)
@@ -28,12 +29,14 @@ class OPTIONS {
     int exit_flag;
     uint16_t supply_port;
     uint16_t demand_port;
+    uint16_t connections;
     std::string name;
     std::string supply_host;
     std::string demand_host;
 
     static constexpr const char *usage{
         "Options:\n"
+        "  -c  --connections   Number of connections to make (1).\n"
         "      --brief         Print brief information (default).\n"
         "  -h  --help          Display this usage information.\n"
         "      --verbose       Print verbose information.\n"
@@ -67,12 +70,13 @@ class OPTIONS {
                 // These options may take an argument:
                 {"help",        no_argument,       0,        'h' },
                 {"version",     no_argument,       0,        'v' },
+                {"connections", required_argument, 0,        'c' },
                 {0,             0,                 0,          0 }
             };
 
             int option_index = 0;
             c = getopt_long(
-                argc, argv, "hv", long_options, &option_index
+                argc, argv, "hvc:", long_options, &option_index
             );
 
             if (c == -1) break; // End of command line parameters?
@@ -102,6 +106,18 @@ class OPTIONS {
                     log(nullptr, "%s\n", version.c_str());
                     exit_flag = 1;
                     break;
+                case 'c': {
+                    int i = atoi(optarg);
+                    if ((i == 0 && (optarg[0] != '0' || optarg[1] != '\0'))
+                    ||  (i <= 0 || i > std::numeric_limits<uint16_t>::max())) {
+                        log(
+                            logfrom.c_str(), "invalid connections: %s", optarg
+                        );
+                        return false;
+                    }
+                    else connections = uint16_t(i);
+                    break;
+                }
                 case '?':
                     // getopt_long already printed an error message.
                     break;

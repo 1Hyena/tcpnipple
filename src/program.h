@@ -41,6 +41,7 @@ class PROGRAM {
     const char *get_supply_host() const;
     const char *get_demand_host() const;
     bool is_verbose() const;
+    uint16_t get_connection_count() const;
 
     private:
     static bool print_text(FILE *fp, const char *text, size_t length);

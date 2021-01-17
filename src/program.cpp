@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include <iostream>
 #include <stdarg.h>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "options.h"
 #include "program.h"
@@ -18,6 +20,10 @@ size_t PROGRAM::log_size = 0;
 bool   PROGRAM::log_time = false;
 
 void PROGRAM::run() {
+    static constexpr const int
+        supply_group = 1,
+        demand_group = 2;
+
     if (!options) return bug();
 
     if (options->exit_flag) {
@@ -26,21 +32,29 @@ void PROGRAM::run() {
     }
 
     bool terminated = false;
+    size_t total_connections = get_connection_count();
 
-    int supply_descriptor{
-        sockets->connect(
-            get_supply_host(), std::to_string(get_supply_port()).c_str()
-        )
-    };
+    std::unordered_map<int, int> supply_map;
+    std::unordered_map<int, int> demand_map;
+    std::unordered_set<int> unmet_supply;
+    std::unordered_set<int> unmet_demand;
+    std::unordered_set<int> descriptors;
 
-    int demand_descriptor{
-        sockets->connect(
-            get_demand_host(), std::to_string(get_demand_port()).c_str()
-        )
-    };
+    bool connecting = false;
 
-    if (supply_descriptor == SOCKETS::NO_DESCRIPTOR
-    ||  demand_descriptor == SOCKETS::NO_DESCRIPTOR) {
+    for (size_t i=0; i<total_connections; ++i) {
+        connecting |= sockets->connect(
+            get_supply_host(), std::to_string(get_supply_port()).c_str(),
+            supply_group
+        );
+
+        connecting |= sockets->connect(
+            get_demand_host(), std::to_string(get_demand_port()).c_str(),
+            demand_group
+        );
+    }
+
+    if (!connecting) {
         terminated = true;
         status = EXIT_FAILURE;
     }
@@ -49,7 +63,8 @@ void PROGRAM::run() {
         log_time = true;
 
         log(
-            "Connecting %s:%d to %s:%d...",
+            "Creating %lu connection%s between %s:%d and %s:%d.",
+            total_connections, total_connections == 1 ? "" : "s",
             get_supply_host(), int(get_supply_port()),
             get_demand_host(), int(get_demand_port())
         );
@@ -82,13 +97,22 @@ void PROGRAM::run() {
         signals->unblock();
 
         if (terminated) {
-            sockets->disconnect(demand_descriptor);
-            sockets->disconnect(supply_descriptor);
+            for (int d : descriptors) {
+                sockets->disconnect(d);
+            }
 
             continue;
         }
 
-        if (!sockets->serve()) {
+        if (is_verbose()) {
+            log(
+                "Connections: %lu + %lu",
+                sockets->get_group_size(demand_group),
+                sockets->get_group_size(supply_group)
+            );
+        }
+
+        if (!sockets->serve(250)) {
             log("%s", "Error while serving sockets.");
             status = EXIT_FAILURE;
             terminated = true;
@@ -96,20 +120,122 @@ void PROGRAM::run() {
 
         int d = SOCKETS::NO_DESCRIPTOR;
         while ((d = sockets->next_disconnection()) != SOCKETS::NO_DESCRIPTOR) {
-            log(
-                "Disconnected %s:%s (descriptor %d).",
-                sockets->get_host(d), sockets->get_port(d), d
-            );
-
             int other = SOCKETS::NO_DESCRIPTOR;
+            int group = sockets->get_group(d);
 
-                 if (d == supply_descriptor) other = demand_descriptor;
-            else if (d == demand_descriptor) other = supply_descriptor;
+            if (group == supply_group) {
+                log(
+                    "Supply descriptor %d has been disconnected from %s:%s.",
+                    d, sockets->get_host(d), sockets->get_port(d)
+                );
+            }
+            else if (group == demand_group) {
+                log(
+                    "Demand descriptor %d has been disconnected from %s:%s.",
+                    d, sockets->get_host(d), sockets->get_port(d)
+                );
+            }
+            else {
+                log(
+                    "Groupless descriptor %d has been disconnected from %s:%s.",
+                    d, sockets->get_host(d), sockets->get_port(d)
+                );
 
-            if (other != SOCKETS::NO_DESCRIPTOR) {
-                sockets->disconnect(other);
+                // Should never happen.
                 terminated = true;
             }
+
+            descriptors.erase(d);
+
+            if (supply_map.count(d)) {
+                other = supply_map[d];
+                supply_map.erase(d);
+            }
+            else if (demand_map.count(d)) {
+                other = demand_map[d];
+                demand_map.erase(d);
+            }
+            else if (unmet_supply.count(d)) {
+                unmet_supply.erase(d);
+            }
+            else if (unmet_demand.count(d)) {
+                unmet_demand.erase(d);
+            }
+
+            if (other != SOCKETS::NO_DESCRIPTOR) {
+                if (supply_map.count(other)) {
+                    supply_map[other] = SOCKETS::NO_DESCRIPTOR;
+                }
+                else if (demand_map.count(other)) {
+                    demand_map[other] = SOCKETS::NO_DESCRIPTOR;
+                }
+
+                sockets->disconnect(other);
+            }
+            else if (descriptors.empty()) {
+                terminated = true;
+            }
+        }
+
+        while ((d = sockets->next_connection()) != SOCKETS::NO_DESCRIPTOR) {
+            int group = sockets->get_group(d);
+
+            descriptors.insert(d);
+
+            if (group == supply_group) {
+                log(
+                    "Supply descriptor %d has been connected to %s:%s.",
+                    d, sockets->get_host(d), sockets->get_port(d)
+                );
+
+                if (unmet_demand.empty()) {
+                    unmet_supply.insert(d);
+                    sockets->freeze(d);
+                }
+                else {
+                    int other = *(unmet_demand.begin());
+                    unmet_demand.erase(other);
+                    demand_map[other] = d;
+                    supply_map[d] = other;
+                    sockets->unfreeze(other);
+                }
+            }
+            else if (group == demand_group) {
+                log(
+                    "Demand descriptor %d has been connected to %s:%s.",
+                    d, sockets->get_host(d), sockets->get_port(d)
+                );
+
+                if (unmet_supply.empty()) {
+                    unmet_demand.insert(d);
+                    sockets->freeze(d);
+                }
+                else {
+                    int other = *(unmet_supply.begin());
+                    unmet_supply.erase(other);
+                    supply_map[other] = d;
+                    demand_map[d] = other;
+                    sockets->unfreeze(other);
+                }
+            }
+            else {
+                log(
+                    "Groupless descriptor %d has been connected to %s:%s.",
+                    d, sockets->get_host(d), sockets->get_port(d)
+                );
+
+                // Should never happen.
+                terminated = true;
+            }
+        }
+
+        if (supply_map.empty() && demand_map.empty()) {
+            if (sockets->get_group_size(demand_group) == 0
+            ||  sockets->get_group_size(supply_group) == 0) {
+                terminated = true;
+            }
+
+            continue;
         }
 
         while ((d = sockets->next_incoming()) != SOCKETS::NO_DESCRIPTOR) {
@@ -117,13 +243,14 @@ void PROGRAM::run() {
 
             int forward_to = SOCKETS::NO_DESCRIPTOR;
 
-                 if (d == supply_descriptor) forward_to = demand_descriptor;
-            else if (d == demand_descriptor) forward_to = supply_descriptor;
-
-            if (forward_to == SOCKETS::NO_DESCRIPTOR) {
-                log("Forbidden condition met (%s:%d).", __FILE__, __LINE__);
+            if (supply_map.count(d)) {
+                forward_to = supply_map[d];
             }
-            else {
+            else if (demand_map.count(d)) {
+                forward_to = demand_map[d];
+            }
+
+            if (forward_to != SOCKETS::NO_DESCRIPTOR) {
                 if (is_verbose()) {
                     log(
                         "%lu byte%s from %s:%s %s sent to %s:%s.",
@@ -346,4 +473,8 @@ uint16_t PROGRAM::get_demand_port() const {
 
 bool PROGRAM::is_verbose() const {
     return options->verbose;
+}
+
+uint16_t PROGRAM::get_connection_count() const {
+    return options->connections;
 }

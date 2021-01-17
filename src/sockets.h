@@ -27,7 +27,10 @@ class SOCKETS {
         MAY_SHUTDOWN   = 10,
         LISTENER       = 11,
         CONNECTING     = 12,
-        MAX_FLAGS      = 13
+        TRIED_IPV4     = 13,
+        TRIED_IPV6     = 14,
+        RECONNECT      = 15,
+        MAX_FLAGS      = 16
     };
 
     private:
@@ -40,6 +43,7 @@ class SOCKETS {
         std::array<char, NI_MAXSERV> port;
         int descriptor;
         int parent;
+        int group;
     };
 
     struct flag_type {
@@ -47,7 +51,9 @@ class SOCKETS {
         FLAG index;
     };
 
-    static constexpr record_type make_record(int descriptor, int parent) {
+    static constexpr record_type make_record(
+        int descriptor, int parent, int group
+    ) {
 #if __cplusplus <= 201703L
         __extension__
 #endif
@@ -59,7 +65,8 @@ class SOCKETS {
             .host       = {'\0'},
             .port       = {'\0'},
             .descriptor = descriptor,
-            .parent     = parent
+            .parent     = parent,
+            .group      = group
         };
 
         for (size_t i = 0; i != record.flags.size(); ++i) {
@@ -144,7 +151,7 @@ class SOCKETS {
             while (!descriptors[key_hash].empty()) {
                 int descriptor = descriptors[key_hash].back().descriptor;
 
-                if (!close_and_clear(descriptor)) {
+                if (!close_and_deinit(descriptor)) {
                     // If for some reason we couldn't close the descriptor,
                     // we still need to deallocate the related memmory.
                     pop(descriptor);
@@ -187,9 +194,22 @@ class SOCKETS {
     }
 
     inline int next_disconnection() {
+        static constexpr const size_t flg_connect_index{
+            static_cast<size_t>(FLAG::NEW_CONNECTION)
+        };
+
         static constexpr const size_t flg_disconnect_index{
             static_cast<size_t>(FLAG::DISCONNECT)
         };
+
+        if (!flags[flg_connect_index].empty()) {
+            // We postpone reporting any disconnections until the application
+            // has acknowledged all the new incoming connections. This prevents
+            // us from reporting a disconnection event before its respective
+            // connection event is reported.
+
+            return NO_DESCRIPTOR;
+        }
 
         if (!flags[flg_disconnect_index].empty()) {
             int descriptor = flags[flg_disconnect_index].back().descriptor;
@@ -213,6 +233,20 @@ class SOCKETS {
         }
 
         return NO_DESCRIPTOR;
+    }
+
+    inline bool is_listener(int descriptor) const {
+        return has_flag(descriptor, FLAG::LISTENER);
+    }
+
+    inline int get_group(int descriptor) const {
+        const record_type *record = find_record(descriptor);
+        return record ? record->group : 0;
+    }
+
+    inline size_t get_group_size(int group) const {
+        if (groups.count(group)) return groups.at(group);
+        return 0;
     }
 
     inline int get_listener(int descriptor) const {
@@ -245,73 +279,12 @@ class SOCKETS {
         return has_flag(descriptor, FLAG::FROZEN);
     }
 
-    inline int connect(const char *host, const char *port) {
-        int epoll_descriptor = NO_DESCRIPTOR;
-        record_type *epoll_record = find_epoll_record();
+    inline bool connect(
+        const char *host, const char *port, int group =0
+    ) {
+        int descriptor = connect(host, port, group, AF_UNSPEC);
 
-        if (!epoll_record) {
-            epoll_descriptor = create_epoll();
-
-            if (epoll_descriptor == NO_DESCRIPTOR) {
-                log(
-                    logfrom.c_str(), "%s: %s (%s:%d)", __FUNCTION__,
-                    "epoll record could not be created", __FILE__, __LINE__
-                );
-
-                return NO_DESCRIPTOR;
-            }
-        }
-        else {
-            epoll_descriptor = epoll_record->descriptor;
-        }
-
-        std::vector<uint8_t> *incoming{new (std::nothrow) std::vector<uint8_t>};
-        std::vector<uint8_t> *outgoing{new (std::nothrow) std::vector<uint8_t>};
-
-        if (!incoming || !outgoing) {
-            log(
-                logfrom.c_str(), "new: out of memory (%s:%d)",
-                __FILE__, __LINE__
-            );
-
-            if (incoming) delete incoming;
-            if (outgoing) delete outgoing;
-
-            return NO_DESCRIPTOR;
-        }
-
-        int descriptor = create_and_bind(host, port, AF_UNSPEC, AI_PASSIVE);
-
-        if (descriptor == NO_DESCRIPTOR) {
-            delete incoming;
-            delete outgoing;
-            return NO_DESCRIPTOR;
-        }
-
-        record_type *record = find_record(descriptor);
-
-        record->incoming = incoming;
-        record->outgoing = outgoing;
-
-        strncpy(record->host.data(), host, record->host.size()-1);
-        strncpy(record->port.data(), port, record->port.size()-1);
-        record->host.back() = '\0';
-        record->port.back() = '\0';
-
-        if (!bind_to_epoll(descriptor, epoll_descriptor)) {
-            if (!close_and_clear(descriptor)) {
-                pop(descriptor);
-            }
-
-            return NO_DESCRIPTOR;
-        }
-
-        if (has_flag(descriptor, FLAG::CONNECTING)) {
-            modify_epoll(descriptor, EPOLLIN|EPOLLOUT|EPOLLET);
-        }
-        else set_flag(descriptor, FLAG::MAY_SHUTDOWN);
-
-        return descriptor;
+        return descriptor != NO_DESCRIPTOR;
     }
 
     inline void disconnect(
@@ -325,7 +298,13 @@ class SOCKETS {
             return;
         }
 
-        set_flag(descriptor, FLAG::DISCONNECT);
+        if (has_flag(descriptor, FLAG::RECONNECT)
+        ||  has_flag(descriptor, FLAG::CONNECTING)) {
+            set_flag(descriptor, FLAG::CLOSE);
+        }
+        else {
+            set_flag(descriptor, FLAG::DISCONNECT);
+        }
 
         if (has_flag(descriptor, FLAG::MAY_SHUTDOWN)) {
             rem_flag(descriptor, FLAG::MAY_SHUTDOWN);
@@ -411,6 +390,8 @@ class SOCKETS {
             // We postpone serving any descriptors until the application has
             // acknowledged all the new incoming connections.
 
+            timeout = std::max(0, timeout);
+
             struct timespec ts;
             ts.tv_sec  = timeout / 1000;
             ts.tv_nsec = (timeout % 1000) * 1000000;
@@ -426,6 +407,9 @@ class SOCKETS {
             FLAG flag = static_cast<FLAG>(i);
 
             switch (flag) {
+                case FLAG::RECONNECT:
+                case FLAG::TRIED_IPV4:
+                case FLAG::TRIED_IPV6:
                 case FLAG::LISTENER:
                 case FLAG::FROZEN:
                 case FLAG::INCOMING:
@@ -502,10 +486,16 @@ class SOCKETS {
                         if (handle_read(d)) continue;
                         break;
                     }
-                    default: break;
+                    default: {
+                        log(
+                            logfrom.c_str(),
+                            "Flag %lu of descriptor %d was not handled.", i, d
+                        );
+
+                        break;
+                    }
                 }
 
-                log(logfrom.c_str(), "%d -> FLAG %lu", d, i);
                 return false;
             }
 
@@ -592,12 +582,50 @@ class SOCKETS {
     static void drop_log(const char *, const char *, ...) {}
 
     inline bool handle_close(int descriptor) {
-        if (!close_and_clear(descriptor)) {
+        bool success = true;
+
+        if (has_flag(descriptor, FLAG::RECONNECT)) {
+            int family = AF_UNSPEC;
+
+            if (!has_flag(descriptor, FLAG::TRIED_IPV4)) {
+                family = AF_INET;
+            }
+            else if (!has_flag(descriptor, FLAG::TRIED_IPV6)) {
+                family = AF_INET6;
+            }
+
+            if (family != AF_UNSPEC) {
+                int group = get_group(descriptor);
+
+                int new_descriptor = connect(
+                    get_host(descriptor), get_port(descriptor), group, family
+                );
+
+                if (new_descriptor != NO_DESCRIPTOR) {
+                    if (has_flag(descriptor, FLAG::TRIED_IPV4)) {
+                        set_flag(new_descriptor, FLAG::TRIED_IPV4);
+                    }
+
+                    if (has_flag(descriptor, FLAG::TRIED_IPV6)) {
+                        set_flag(new_descriptor, FLAG::TRIED_IPV6);
+                    }
+                }
+                else success = false;
+            }
+        }
+        else if (has_flag(descriptor, FLAG::CONNECTING)) {
+            log(
+                logfrom.c_str(), "Failed to connect to %s:%s.",
+                get_host(descriptor), get_port(descriptor)
+            );
+        }
+
+        if (!close_and_deinit(descriptor)) {
             pop(descriptor);
             return false;
         }
 
-        return true;
+        return success;
     }
 
     inline bool handle_epoll(int epoll_descriptor, int timeout) {
@@ -666,17 +694,32 @@ class SOCKETS {
                         }
                     }
                     else {
-                        record_type *rec = find_record(d);
+                        switch (socket_error) {
+                            case EPIPE:
+                            case ECONNRESET: {
+                                // Silent errors.
+                                break;
+                            }
+                            case ECONNREFUSED: {
+                                if (has_flag(d, FLAG::CONNECTING)) {
+                                    if (!has_flag(d, FLAG::TRIED_IPV4)
+                                    ||  !has_flag(d, FLAG::TRIED_IPV6)) {
+                                        set_flag(d, FLAG::RECONNECT);
+                                    }
 
-                        if ((socket_error != EPIPE
-                          && socket_error != ECONNRESET)
-                        ||  rec == nullptr
-                        ||  rec->parent == NO_DESCRIPTOR) {
-                            log(
-                                logfrom.c_str(),
-                                "epoll error on descriptor %d: %s (%s:%d)", d,
-                                strerror(socket_error), __FILE__, __LINE__
-                            );
+                                    break;
+                                }
+                            } // fall through
+                            default: {
+                                log(
+                                    logfrom.c_str(),
+                                    "epoll error on descriptor %d: %s (%s:%d)",
+                                    d, strerror(socket_error), __FILE__,
+                                    __LINE__
+                                );
+
+                                break;
+                            }
                         }
                     }
                 }
@@ -690,7 +733,6 @@ class SOCKETS {
                 }
 
                 rem_flag(d, FLAG::MAY_SHUTDOWN);
-                rem_flag(d, FLAG::CONNECTING);
                 disconnect(d);
 
                 continue;
@@ -769,6 +811,7 @@ class SOCKETS {
         if (has_flag(descriptor, FLAG::CONNECTING)) {
             set_flag(descriptor, FLAG::MAY_SHUTDOWN);
             rem_flag(descriptor, FLAG::CONNECTING);
+            set_flag(descriptor, FLAG::NEW_CONNECTION);
             modify_epoll(descriptor, EPOLLIN|EPOLLET|EPOLLRDHUP);
         }
 
@@ -917,20 +960,14 @@ class SOCKETS {
 
             // Something has gone terribly wrong.
 
-            if (!close_and_clear(descriptor)) {
+            if (!close_and_deinit(descriptor)) {
                 pop(descriptor);
             }
 
             return false;
         }
 
-        size_t client_descriptor_key{
-            client_descriptor % descriptors.size()
-        };
-
-        descriptors[client_descriptor_key].emplace_back(
-            make_record(client_descriptor, int(descriptor))
-        );
+        push(make_record(client_descriptor, descriptor, 0));
 
         record_type *client_record = find_record(client_descriptor);
 
@@ -944,7 +981,7 @@ class SOCKETS {
                 __FILE__, __LINE__
             );
 
-            if (!close_and_clear(client_descriptor)) {
+            if (!close_and_deinit(client_descriptor)) {
                 pop(client_descriptor);
             }
 
@@ -994,7 +1031,7 @@ class SOCKETS {
                 );
             }
 
-            if (!close_and_clear(client_descriptor)) {
+            if (!close_and_deinit(client_descriptor)) {
                 pop(client_descriptor);
             }
         }
@@ -1006,6 +1043,87 @@ class SOCKETS {
         set_flag(descriptor, FLAG::ACCEPT);
 
         return true;
+    }
+
+    inline int connect(
+        const char *host, const char *port, int group, int family
+    ) {
+        int epoll_descriptor = NO_DESCRIPTOR;
+        record_type *epoll_record = find_epoll_record();
+
+        if (!epoll_record) {
+            epoll_descriptor = create_epoll();
+
+            if (epoll_descriptor == NO_DESCRIPTOR) {
+                log(
+                    logfrom.c_str(), "%s: %s (%s:%d)", __FUNCTION__,
+                    "epoll record could not be created", __FILE__, __LINE__
+                );
+
+                return NO_DESCRIPTOR;
+            }
+        }
+        else {
+            epoll_descriptor = epoll_record->descriptor;
+        }
+
+        std::vector<uint8_t> *incoming{new (std::nothrow) std::vector<uint8_t>};
+        std::vector<uint8_t> *outgoing{new (std::nothrow) std::vector<uint8_t>};
+
+        if (!incoming || !outgoing) {
+            log(
+                logfrom.c_str(), "new: out of memory (%s:%d)",
+                __FILE__, __LINE__
+            );
+
+            if (incoming) delete incoming;
+            if (outgoing) delete outgoing;
+
+            return NO_DESCRIPTOR;
+        }
+
+        int descriptor = open_and_init(host, port, family, AI_PASSIVE);
+
+        if (descriptor == NO_DESCRIPTOR) {
+            delete incoming;
+            delete outgoing;
+            return NO_DESCRIPTOR;
+        }
+
+        set_group(descriptor, group);
+
+        record_type *record = find_record(descriptor);
+
+        record->incoming = incoming;
+        record->outgoing = outgoing;
+
+        if (record->host.front() == '\0') {
+            strncpy(record->host.data(), host, record->host.size()-1);
+            record->host.back() = '\0';
+        }
+
+        if (record->port.front() == '\0') {
+            strncpy(record->port.data(), port, record->port.size()-1);
+            record->port.back() = '\0';
+        }
+
+        if (!bind_to_epoll(descriptor, epoll_descriptor)) {
+            if (!close_and_deinit(descriptor)) {
+                pop(descriptor);
+            }
+
+            return NO_DESCRIPTOR;
+        }
+
+        if (has_flag(descriptor, FLAG::CONNECTING)) {
+            modify_epoll(descriptor, EPOLLOUT|EPOLLET);
+        }
+        else {
+            set_flag(descriptor, FLAG::MAY_SHUTDOWN);
+            set_flag(descriptor, FLAG::NEW_CONNECTION);
+        }
+
+        return descriptor;
     }
 
     inline int listen(const char *port, int family, int ai_flags =AI_PASSIVE) {
@@ -1028,7 +1146,7 @@ class SOCKETS {
             epoll_descriptor = epoll_record->descriptor;
         }
 
-        int descriptor = create_and_bind(nullptr, port, family, ai_flags);
+        int descriptor = open_and_init(nullptr, port, family, ai_flags);
 
         if (descriptor == NO_DESCRIPTOR) return NO_DESCRIPTOR;
 
@@ -1050,7 +1168,7 @@ class SOCKETS {
                 );
             }
 
-            if (!close_and_clear(descriptor)) {
+            if (!close_and_deinit(descriptor)) {
                 pop(descriptor);
             }
 
@@ -1058,7 +1176,7 @@ class SOCKETS {
         }
 
         if (!bind_to_epoll(descriptor, epoll_descriptor)) {
-            if (!close_and_clear(descriptor)) {
+            if (!close_and_deinit(descriptor)) {
                 pop(descriptor);
             }
 
@@ -1094,23 +1212,19 @@ class SOCKETS {
             return NO_DESCRIPTOR;
         }
 
-        size_t descriptor_key = epoll_descriptor % descriptors.size();
+        push(make_record(epoll_descriptor, NO_DESCRIPTOR, 0));
 
-        descriptors[descriptor_key].emplace_back(
-            make_record(epoll_descriptor, NO_DESCRIPTOR)
-        );
+        record_type *record = find_record(epoll_descriptor);
 
-        record_type &record = descriptors[descriptor_key].back();
+        record->events = new (std::nothrow) epoll_event [1+EPOLL_MAX_EVENTS];
 
-        record.events = new (std::nothrow) epoll_event [1+EPOLL_MAX_EVENTS];
-
-        if (record.events == nullptr) {
+        if (record->events == nullptr) {
             log(
                 logfrom.c_str(), "new: out of memory (%s:%d)",
                 __FILE__, __LINE__
             );
 
-            if (!close_and_clear(epoll_descriptor)) {
+            if (!close_and_deinit(epoll_descriptor)) {
                 pop(epoll_descriptor);
             }
 
@@ -1158,7 +1272,7 @@ class SOCKETS {
         return true;
     }
 
-    inline int create_and_bind(
+    inline int open_and_init(
         const char *host, const char *port, int family, int ai_flags =AI_PASSIVE
     ) {
         struct addrinfo hint =
@@ -1207,57 +1321,55 @@ class SOCKETS {
                 continue;
             }
 
-            size_t descriptor_key = descriptor % descriptors.size();
+            push(make_record(descriptor, NO_DESCRIPTOR, 0));
 
-            descriptors[descriptor_key].emplace_back(
-                make_record(descriptor, NO_DESCRIPTOR)
-            );
+            if (host == nullptr) {
+                int optval = 1;
+                retval = setsockopt(
+                    descriptor, SOL_SOCKET, SO_REUSEADDR,
+                    (const void *) &optval, sizeof(optval)
+                );
 
-            int optval = 1;
-            retval = setsockopt(
-                descriptor, SOL_SOCKET, SO_REUSEADDR,
-                (const void *) &optval, sizeof(optval)
-            );
-
-            if (retval != 0) {
-                if (retval == -1) {
-                    int code = errno;
-
-                    log(
-                        logfrom.c_str(), "setsockopt: %s (%s:%d)",
-                        strerror(code), __FILE__, __LINE__
-                    );
-                }
-                else {
-                    log(
-                        logfrom.c_str(),
-                        "setsockopt: unexpected return value %d (%s:%d)",
-                        retval, __FILE__, __LINE__
-                    );
-                }
-            }
-            else if (host == nullptr) {
-                retval = bind(descriptor, next->ai_addr, next->ai_addrlen);
-
-                if (retval) {
+                if (retval != 0) {
                     if (retval == -1) {
                         int code = errno;
 
                         log(
-                            logfrom.c_str(), "bind: %s (%s:%d)", strerror(code),
-                            __FILE__, __LINE__
+                            logfrom.c_str(), "setsockopt: %s (%s:%d)",
+                            strerror(code), __FILE__, __LINE__
                         );
                     }
                     else {
                         log(
                             logfrom.c_str(),
-                            "bind(%d, ?, %d) returned %d (%s:%d)",
-                            descriptor, next->ai_addrlen, retval,
-                            __FILE__, __LINE__
+                            "setsockopt: unexpected return value %d (%s:%d)",
+                            retval, __FILE__, __LINE__
                         );
                     }
                 }
-                else break;
+                else {
+                    retval = bind(descriptor, next->ai_addr, next->ai_addrlen);
+
+                    if (retval) {
+                        if (retval == -1) {
+                            int code = errno;
+
+                            log(
+                                logfrom.c_str(), "bind: %s (%s:%d)",
+                                strerror(code), __FILE__, __LINE__
+                            );
+                        }
+                        else {
+                            log(
+                                logfrom.c_str(),
+                                "bind(%d, ?, %d) returned %d (%s:%d)",
+                                descriptor, next->ai_addrlen, retval,
+                                __FILE__, __LINE__
+                            );
+                        }
+                    }
+                    else break;
+                }
             }
             else {
                 // Let's block all signals before calling connect because we
@@ -1292,6 +1404,13 @@ class SOCKETS {
                             if (code == EINPROGRESS) {
                                 success = true;
                                 set_flag(descriptor, FLAG::CONNECTING);
+
+                                if (next->ai_family == AF_INET6) {
+                                    set_flag(descriptor, FLAG::TRIED_IPV6);
+                                }
+                                else if (next->ai_family == AF_INET) {
+                                    set_flag(descriptor, FLAG::TRIED_IPV4);
+                                }
                             }
                             else {
                                 log(
@@ -1330,7 +1449,7 @@ class SOCKETS {
                 }
             }
 
-            if (!close_and_clear(descriptor)) {
+            if (!close_and_deinit(descriptor)) {
                 log(
                     logfrom.c_str(), "failed to close descriptor %d (%s:%d)",
                     descriptor, __FILE__, __LINE__
@@ -1348,7 +1467,7 @@ class SOCKETS {
         return descriptor;
     }
 
-    inline size_t close_and_clear(int descriptor) {
+    inline size_t close_and_deinit(int descriptor) {
         // Returns the number of descriptors successfully closed as a result.
 
         if (descriptor == NO_DESCRIPTOR) {
@@ -1493,9 +1612,26 @@ class SOCKETS {
         return closed;
     }
 
+    inline void push(record_type record) {
+        if (record.descriptor == NO_DESCRIPTOR) {
+            return;
+        }
+
+        int descriptor = record.descriptor;
+        int group = record.group;
+
+        size_t descriptor_key{
+            descriptor % descriptors.size()
+        };
+
+        descriptors[descriptor_key].emplace_back(record);
+
+        set_group(descriptor, group);
+    }
+
     inline record_type pop(int descriptor) {
         if (descriptor == NO_DESCRIPTOR) {
-            return make_record(NO_DESCRIPTOR, NO_DESCRIPTOR);
+            return make_record(NO_DESCRIPTOR, NO_DESCRIPTOR, 0);
         }
 
         size_t key_hash = descriptor % descriptors.size();
@@ -1520,14 +1656,16 @@ class SOCKETS {
             if (rec.incoming) delete rec.incoming;
             if (rec.outgoing) delete rec.outgoing;
 
+            rem_group(descriptor);
+
             // Finally, we remove the record.
             descriptors[key_hash][i] = descriptors[key_hash].back();
             descriptors[key_hash].pop_back();
 
-            return make_record(descriptor, parent_descriptor);
+            return make_record(descriptor, parent_descriptor, 0);
         }
 
-        return make_record(NO_DESCRIPTOR, NO_DESCRIPTOR);
+        return make_record(NO_DESCRIPTOR, NO_DESCRIPTOR, 0);
     }
 
     inline const record_type *find_record(int descriptor) const {
@@ -1566,10 +1704,6 @@ class SOCKETS {
         }
 
         return epoll_record;
-    }
-
-    inline bool is_listener(int descriptor) {
-        return has_flag(descriptor, FLAG::LISTENER);
     }
 
     bool modify_epoll(int descriptor, uint32_t events) {
@@ -1620,7 +1754,46 @@ class SOCKETS {
         return true;
     }
 
-    bool set_flag(int descriptor, FLAG flag) {
+    bool set_group(int descriptor, int group) {
+        record_type *rec = find_record(descriptor);
+
+        if (!rec) return false;
+
+        if (groups.count(rec->group)) {
+            if (groups[rec->group]) {
+                if (--groups[rec->group] == 0) {
+                    groups.erase(rec->group);
+                }
+            }
+            else {
+                log(
+                    logfrom.c_str(),
+                    "Forbidden condition met (%s:%d).", __FILE__, __LINE__
+                 );
+            }
+        }
+
+        rec->group = group;
+
+        if (group == 0) {
+            // 0 stands for no group. We don't keep track of its size.
+            return true;
+        }
+
+        groups[group]++;
+
+        return true;
+    }
+
+    bool rem_group(int descriptor) {
+        return set_group(descriptor, 0);
+    }
+
+    bool set_flag(int descriptor, FLAG flag, bool value =true) {
+        if (value == false) {
+            return rem_flag(descriptor, flag);
+        }
+
         size_t index = static_cast<size_t>(flag);
 
         if (index > flags.size()) {
@@ -1677,14 +1850,14 @@ class SOCKETS {
         return true;
     }
 
-    bool has_flag(int descriptor, FLAG flag) {
+    bool has_flag(int descriptor, FLAG flag) const {
         size_t index = static_cast<size_t>(flag);
 
         if (index > flags.size()) {
             return false;
         }
 
-        record_type *rec = find_record(descriptor);
+        const record_type *rec = find_record(descriptor);
 
         if (!rec) return false;
 
@@ -1699,6 +1872,7 @@ class SOCKETS {
 
     std::string logfrom;
     void (*log)(const char *, const char *p_fmt, ...);
+    std::unordered_map<int, size_t> groups;
     std::array<std::vector<record_type>, 1024> descriptors;
     std::array<
         std::vector<flag_type>,
