@@ -767,6 +767,7 @@ class SOCKETS {
         if (has_flag(descriptor, FLAG::CONNECTING)) {
             set_flag(descriptor, FLAG::MAY_SHUTDOWN);
             rem_flag(descriptor, FLAG::CONNECTING);
+            modify_epoll(descriptor, EPOLLIN|EPOLLET);
         }
 
         record_type *record = find_record(descriptor);
