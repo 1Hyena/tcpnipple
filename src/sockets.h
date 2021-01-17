@@ -377,7 +377,7 @@ class SOCKETS {
         return true;
     }
 
-    inline bool serve(int timeout =0) {
+    inline bool serve(int timeout =-1) {
         static constexpr const size_t flg_connect_index{
             static_cast<size_t>(FLAG::NEW_CONNECTION)
         };
