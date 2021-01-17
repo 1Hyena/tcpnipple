@@ -637,6 +637,7 @@ class SOCKETS {
 
             if ((  events[i].events & EPOLLERR )
             ||  (  events[i].events & EPOLLHUP )
+            ||  (  events[i].events & EPOLLRDHUP )
             ||  (!(events[i].events & (EPOLLIN|EPOLLOUT) ))) {
                 int socket_error = 0;
                 socklen_t socket_errlen = sizeof(socket_error);
@@ -679,7 +680,8 @@ class SOCKETS {
                         }
                     }
                 }
-                else if ((events[i].events & EPOLLHUP) == false) {
+                else if ((events[i].events & EPOLLHUP) == false
+                && (events[i].events & EPOLLRDHUP) == false) {
                     log(
                         logfrom.c_str(),
                         "unexpected events %d on descriptor %d (%s:%d)",
@@ -767,7 +769,7 @@ class SOCKETS {
         if (has_flag(descriptor, FLAG::CONNECTING)) {
             set_flag(descriptor, FLAG::MAY_SHUTDOWN);
             rem_flag(descriptor, FLAG::CONNECTING);
-            modify_epoll(descriptor, EPOLLIN|EPOLLET);
+            modify_epoll(descriptor, EPOLLIN|EPOLLET|EPOLLRDHUP);
         }
 
         record_type *record = find_record(descriptor);
@@ -826,10 +828,10 @@ class SOCKETS {
         }
 
         if (try_again_later) {
-            return modify_epoll(descriptor, EPOLLIN|EPOLLET);
+            return modify_epoll(descriptor, EPOLLIN|EPOLLET|EPOLLRDHUP);
         }
 
-        return modify_epoll(descriptor, EPOLLIN|EPOLLOUT|EPOLLET);
+        return modify_epoll(descriptor, EPOLLIN|EPOLLOUT|EPOLLET|EPOLLRDHUP);
     }
 
     inline bool handle_accept(int descriptor) {
@@ -969,7 +971,7 @@ class SOCKETS {
         epoll_event *event = &(epoll_record->events[0]);
 
         event->data.fd = client_descriptor;
-        event->events = EPOLLIN|EPOLLET;
+        event->events = EPOLLIN|EPOLLET|EPOLLRDHUP;
 
         retval = epoll_ctl(
             epoll_descriptor, EPOLL_CTL_ADD, client_descriptor, event
@@ -1127,7 +1129,7 @@ class SOCKETS {
         epoll_event *event = &(record->events[0]);
 
         event->data.fd = descriptor;
-        event->events = EPOLLIN|EPOLLET;
+        event->events = EPOLLIN|EPOLLET|EPOLLRDHUP;
 
         int retval{
             epoll_ctl(epoll_descriptor, EPOLL_CTL_ADD, descriptor, event)
