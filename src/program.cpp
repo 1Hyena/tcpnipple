@@ -104,15 +104,7 @@ void PROGRAM::run() {
             continue;
         }
 
-        if (is_verbose()) {
-            log(
-                "Connections: %lu + %lu",
-                sockets->get_group_size(demand_group),
-                sockets->get_group_size(supply_group)
-            );
-        }
-
-        if (!sockets->serve(250)) {
+        if (!sockets->serve()) {
             log("%s", "Error while serving sockets.");
             status = EXIT_FAILURE;
             terminated = true;

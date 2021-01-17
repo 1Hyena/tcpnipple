@@ -15,7 +15,7 @@ class SOCKETS {
 
     enum class FLAG : uint8_t {
         NONE           =  0,
-        EPOLL          =  1,
+        RECONNECT      =  1,
         READ           =  2,
         WRITE          =  3,
         ACCEPT         =  4,
@@ -29,7 +29,8 @@ class SOCKETS {
         CONNECTING     = 12,
         TRIED_IPV4     = 13,
         TRIED_IPV6     = 14,
-        RECONNECT      = 15,
+        // Do not change the order of these flags:
+        EPOLL          = 15,
         MAX_FLAGS      = 16
     };
 
@@ -390,14 +391,6 @@ class SOCKETS {
             // We postpone serving any descriptors until the application has
             // acknowledged all the new incoming connections.
 
-            timeout = std::max(0, timeout);
-
-            struct timespec ts;
-            ts.tv_sec  = timeout / 1000;
-            ts.tv_nsec = (timeout % 1000) * 1000000;
-
-            pselect(0, nullptr, nullptr, nullptr, &ts, &sigset_none);
-
             return true;
         }
 
@@ -433,6 +426,10 @@ class SOCKETS {
 
             for (size_t j=0, sz=recbuf.size(); j<sz; ++j) {
                 int d = recbuf[j];
+                const record_type *record = find_record(d);
+
+                if (record == nullptr) continue;
+
                 rem_flag(d, flag);
 
                 switch (flag) {
@@ -451,7 +448,19 @@ class SOCKETS {
                             continue;
                         }
 
-                        if (handle_close(d)) continue;
+                        if (handle_close(d)) {
+                            // If we were trying to connect to a server but the
+                            // attempt failed, then we must prevent the epoll
+                            // handler from waiting. It may very well be that no
+                            // event would ever be triggered, causing the epoll
+                            // handler to wait indefinitely. Instead, we should
+                            // immediately return the control back to the
+                            // caller.
+
+                            timeout = 0;
+                            continue;
+                        }
+
                         break;
                     }
                     case FLAG::ACCEPT: {
@@ -629,10 +638,22 @@ class SOCKETS {
     }
 
     inline bool handle_epoll(int epoll_descriptor, int timeout) {
-        record_type *record = find_record(epoll_descriptor);
-        epoll_event *events = &(record->events[1]);
+        static constexpr const std::array<size_t, 4> blockers{
+            static_cast<size_t>(FLAG::NEW_CONNECTION),
+            static_cast<size_t>(FLAG::DISCONNECT),
+            static_cast<size_t>(FLAG::INCOMING)
+        };
 
         set_flag(epoll_descriptor, FLAG::EPOLL);
+
+        for (size_t flag_index : blockers) {
+            if (!flags[flag_index].empty()) {
+                return true;
+            }
+        }
+
+        record_type *record = find_record(epoll_descriptor);
+        epoll_event *events = &(record->events[1]);
 
         int pending = epoll_pwait(
             epoll_descriptor, events, EPOLL_MAX_EVENTS, timeout, &sigset_none
