@@ -8,6 +8,10 @@
 #include <netdb.h>
 #include <sys/epoll.h>
 #include <unordered_map>
+#include <signal.h>
+#include <string.h>
+#include <stdarg.h>
+#include <unistd.h>
 
 class SOCKETS {
     public:
