@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <netdb.h>
 #include <sys/epoll.h>
+#include <unordered_map>
 
 class SOCKETS {
     public:
