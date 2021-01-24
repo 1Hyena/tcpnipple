@@ -315,6 +315,13 @@ class SOCKETS {
         if (has_flag(descriptor, FLAG::MAY_SHUTDOWN)) {
             rem_flag(descriptor, FLAG::MAY_SHUTDOWN);
 
+            if (has_flag(descriptor, FLAG::WRITE)
+            && !has_flag(descriptor, FLAG::CONNECTING)) {
+                // Let's handle writing here so that the descriptor would have a
+                // chance to receive any pending bytes before being shut down.
+                handle_write(descriptor);
+            }
+
             int retval = shutdown(descriptor, SHUT_WR);
             if (retval == -1) {
                 int code = errno;
