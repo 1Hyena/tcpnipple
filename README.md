@@ -4,7 +4,7 @@ connections. It connects simultaneously to two hosts (_supply_ and _demand_) and
 exchanges data between them.
 
 ```
-Usage: ../tcpnipple [options] supply-host supply-port demand-host demand-port
+Usage: ./tcpnipple [options] supply-host supply-port demand-host demand-port
 Options:
   -c  --connections   Number of connections to make (1).
       --brief         Print brief information (default).
