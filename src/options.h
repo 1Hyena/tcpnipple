@@ -109,7 +109,7 @@ class OPTIONS {
                 case 'c': {
                     int i = atoi(optarg);
                     if ((i == 0 && (optarg[0] != '0' || optarg[1] != '\0'))
-                    ||  (i <= 0 || i > std::numeric_limits<uint16_t>::max())) {
+                    ||  (i <  0 || i > std::numeric_limits<uint16_t>::max())) {
                         log(
                             logfrom.c_str(), "invalid connections: %s", optarg
                         );

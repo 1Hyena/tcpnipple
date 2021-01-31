@@ -1073,9 +1073,11 @@ class SOCKETS {
             set_flag(client_descriptor, FLAG::MAY_SHUTDOWN);
         }
 
-        set_flag(descriptor, FLAG::ACCEPT);
+        // We successfully accepted one client, but since there may be more of
+        // them waiting we should recursively retry until we fail to accept any
+        // new connections.
 
-        return true;
+        return handle_accept(descriptor);
     }
 
     inline int connect(

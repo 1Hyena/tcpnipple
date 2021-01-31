@@ -54,7 +54,21 @@ void PROGRAM::run() {
         );
     }
 
-    if (!connecting) {
+    if (!total_connections) {
+        terminated = true;
+        status = EXIT_SUCCESS;
+
+        if (is_verbose()) {
+            log_time = true;
+
+            log(
+                "No connections are to be made between %s:%d and %s:%d.",
+                get_supply_host(), int(get_supply_port()),
+                get_demand_host(), int(get_demand_port())
+            );
+        }
+    }
+    else if (!connecting) {
         terminated = true;
         status = EXIT_FAILURE;
     }
