@@ -294,14 +294,14 @@ bool PROGRAM::init(int argc, char **argv) {
         return false;
     }
 
-    sockets = new (std::nothrow) SOCKETS(print_log);
+    sockets = new (std::nothrow) SOCKETS();
     if (!sockets) return false;
 
-    if (!sockets->init()) {
-        return false;
-    }
-
-    return true;
+    return sockets->init(
+        [&](const char *txt) {
+            print_log("Sockets", "%s", txt);
+        }
+    );
 }
 
 int PROGRAM::deinit() {

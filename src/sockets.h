@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
-#ifndef SOCKETS_H_02_01_2021
-#define SOCKETS_H_02_01_2021
+#ifndef SOCKETS_H_05_01_2023
+#define SOCKETS_H_05_01_2023
 
 #include <array>
 #include <vector>
 #include <algorithm>
+#include <functional>
 #include <netdb.h>
 #include <sys/epoll.h>
 #include <unordered_map>
@@ -96,29 +97,26 @@ class SOCKETS {
     }
 
     public:
-    SOCKETS(
-        void (*log_fun) (const char *, const char *, ...) =drop_log,
-        const char *log_src ="Sockets"
-    ) : logfrom(log_src)
-      , log    (log_fun)
-    {}
+    SOCKETS() : log_callback(nullptr) {}
     ~SOCKETS() {}
 
-    inline bool init() {
+    inline bool init(
+        const std::function<void(const char *text)>& log_cb = nullptr
+    ) {
+        log_callback = log_cb;
+
         int retval = sigfillset(&sigset_all);
         if (retval == -1) {
             int code = errno;
 
             log(
-                logfrom.c_str(), "sigfillset: %s (%s:%d)", strerror(code),
-                __FILE__, __LINE__
+                "sigfillset: %s (%s:%d)", strerror(code), __FILE__, __LINE__
             );
 
             return false;
         }
         else if (retval) {
             log(
-                logfrom.c_str(),
                 "sigfillset: unexpected return value %d (%s:%d)", retval,
                 __FILE__, __LINE__
             );
@@ -131,15 +129,13 @@ class SOCKETS {
             int code = errno;
 
             log(
-                logfrom.c_str(), "sigemptyset: %s (%s:%d)", strerror(code),
-                __FILE__, __LINE__
+                "sigemptyset: %s (%s:%d)", strerror(code), __FILE__, __LINE__
             );
 
             return false;
         }
         else if (retval) {
             log(
-                logfrom.c_str(),
                 "sigemptyset: unexpected return value %d (%s:%d)", retval,
                 __FILE__, __LINE__
             );
@@ -327,13 +323,12 @@ class SOCKETS {
                 int code = errno;
 
                 log(
-                    logfrom.c_str(), "shutdown(%d, SHUT_WR): %s (%s:%d)",
-                    descriptor, strerror(code), file, line
+                    "shutdown(%d, SHUT_WR): %s (%s:%d)", descriptor,
+                    strerror(code), file, line
                 );
             }
             else if (retval != 0) {
                 log(
-                    logfrom.c_str(),
                     "shutdown(%d, SHUT_WR): unexpected return value of %d "
                     "(%s:%d)", descriptor, retval, file, line
                 );
@@ -509,7 +504,6 @@ class SOCKETS {
                     }
                     default: {
                         log(
-                            logfrom.c_str(),
                             "Flag %lu of descriptor %d was not handled.", i, d
                         );
 
@@ -538,7 +532,6 @@ class SOCKETS {
 
         if (retval < 0) {
             log(
-                logfrom.c_str(),
                 "%s: encoding error when formatting '%s' (%s:%d).",
                 __FUNCTION__, fmt, __FILE__, __LINE__
             );
@@ -561,7 +554,6 @@ class SOCKETS {
 
                 if (heapbuf == nullptr) {
                     log(
-                        logfrom.c_str(),
                         "%s: out of memory when formatting '%s' (%s:%d).",
                         __FUNCTION__, fmt, __FILE__, __LINE__
                     );
@@ -575,7 +567,6 @@ class SOCKETS {
 
                 if (retval < 0) {
                     log(
-                        logfrom.c_str(),
                         "%s: encoding error when formatting '%s' (%s:%d).",
                         __FUNCTION__, fmt, __FILE__, __LINE__
                     );
@@ -588,7 +579,6 @@ class SOCKETS {
                 }
                 else {
                     log(
-                        logfrom.c_str(),
                         "%s: unexpected program flow (%s:%d).",
                         __FUNCTION__, __FILE__, __LINE__
                     );
@@ -597,6 +587,38 @@ class SOCKETS {
                 delete [] heapbuf;
             }
         }
+    }
+
+    void log(const char *fmt, ...) const __attribute__((format(printf, 2, 3))) {
+        if (!log_callback) return;
+
+        char stackbuf[256];
+        char *bufptr = stackbuf;
+        size_t bufsz = sizeof(stackbuf);
+
+        for (size_t i=0; i<2 && bufptr; ++i) {
+            va_list args;
+            va_start(args, fmt);
+            int cx = vsnprintf(bufptr, bufsz, fmt, args);
+            va_end(args);
+
+            if ((cx >= 0 && (size_t)cx < bufsz) || cx < 0) {
+                log_callback(bufptr);
+                break;
+            }
+
+            if (bufptr == stackbuf) {
+                bufsz = cx + 1;
+                bufptr = new (std::nothrow) char[bufsz];
+                if (!bufptr) log_callback("out of memory");
+            }
+            else {
+                log_callback(bufptr);
+                break;
+            }
+        }
+
+        if (bufptr && bufptr != stackbuf) delete [] bufptr;
     }
 
     private:
@@ -636,7 +658,7 @@ class SOCKETS {
         }
         else if (has_flag(descriptor, FLAG::CONNECTING)) {
             log(
-                logfrom.c_str(), "Failed to connect to %s:%s.",
+                "Failed to connect to %s:%s.",
                 get_host(descriptor), get_port(descriptor)
             );
         }
@@ -677,15 +699,13 @@ class SOCKETS {
             if (code == EINTR) return true;
 
             log(
-                logfrom.c_str(), "epoll_pwait: %s (%s:%d)", strerror(code),
-                __FILE__, __LINE__
+                "epoll_pwait: %s (%s:%d)", strerror(code), __FILE__, __LINE__
             );
 
             return false;
         }
         else if (pending < 0) {
             log(
-                logfrom.c_str(),
                 "epoll_pwait: unexpected return value %d (%s:%d)", pending,
                 __FILE__, __LINE__
             );
@@ -714,13 +734,12 @@ class SOCKETS {
                             int code = errno;
 
                             log(
-                                logfrom.c_str(), "getsockopt: %s (%s:%d)",
+                                "getsockopt: %s (%s:%d)",
                                 strerror(code), __FILE__, __LINE__
                             );
                         }
                         else {
                             log(
-                                logfrom.c_str(),
                                 "getsockopt: unexpected return value %d "
                                 "(%s:%d)", retval, __FILE__, __LINE__
                             );
@@ -745,7 +764,6 @@ class SOCKETS {
                             } // fall through
                             default: {
                                 log(
-                                    logfrom.c_str(),
                                     "epoll error on descriptor %d: %s (%s:%d)",
                                     d, strerror(socket_error), __FILE__,
                                     __LINE__
@@ -759,7 +777,6 @@ class SOCKETS {
                 else if ((events[i].events & EPOLLHUP) == false
                 && (events[i].events & EPOLLRDHUP) == false) {
                     log(
-                        logfrom.c_str(),
                         "unexpected events %d on descriptor %d (%s:%d)",
                         events[i].events, d, __FILE__, __LINE__
                     );
@@ -805,16 +822,14 @@ class SOCKETS {
                     }
 
                     log(
-                        logfrom.c_str(), "read(%d, ?, %lu): %s (%s:%d)",
-                        descriptor, sizeof(buf), strerror(code),
-                        __FILE__, __LINE__
+                        "read(%d, ?, %lu): %s (%s:%d)", descriptor, sizeof(buf),
+                        strerror(code), __FILE__, __LINE__
                     );
 
                     break;
                 }
 
                 log(
-                    logfrom.c_str(),
                     "read(%d, ?, %lu): unexpected return value %lld (%s:%d)",
                     descriptor, sizeof(buf), (long long)(count),
                     __FILE__, __LINE__
@@ -879,8 +894,8 @@ class SOCKETS {
                     }
                     else {
                         log(
-                            logfrom.c_str(), "write: %s (%s:%d)",
-                            strerror(code), __FILE__, __LINE__
+                            "write: %s (%s:%d)", strerror(code),
+                            __FILE__, __LINE__
                         );
                     }
                 }
@@ -916,7 +931,7 @@ class SOCKETS {
 
         if (!epoll_record) {
             log(
-                logfrom.c_str(), "%s: %s (%s:%d)", __FUNCTION__,
+                "%s: %s (%s:%d)", __FUNCTION__,
                 "epoll record could not be found", __FILE__, __LINE__
             );
 
@@ -958,8 +973,8 @@ class SOCKETS {
                         // These errors are supposed to be temporary.
 
                         log(
-                            logfrom.c_str(), "accept4: %s (%s:%d)",
-                            strerror(code), __FILE__, __LINE__
+                            "accept4: %s (%s:%d)", strerror(code),
+                            __FILE__, __LINE__
                         );
 
                         set_flag(descriptor, FLAG::ACCEPT);
@@ -975,8 +990,8 @@ class SOCKETS {
                         // These errors are fatal.
 
                         log(
-                            logfrom.c_str(), "accept4: %s (%s:%d)",
-                            strerror(code), __FILE__, __LINE__
+                            "accept4: %s (%s:%d)", strerror(code),
+                            __FILE__, __LINE__
                         );
 
                         break;
@@ -985,7 +1000,6 @@ class SOCKETS {
             }
             else {
                 log(
-                    logfrom.c_str(),
                     "accept4: unexpected return value %d (%s:%d)",
                     client_descriptor, __FILE__, __LINE__
                 );
@@ -1010,8 +1024,7 @@ class SOCKETS {
         if (!client_record->incoming
         ||  !client_record->outgoing) {
             log(
-                logfrom.c_str(), "new: out of memory (%s:%d)",
-                __FILE__, __LINE__
+                "new: out of memory (%s:%d)", __FILE__, __LINE__
             );
 
             if (!close_and_deinit(client_descriptor)) {
@@ -1030,8 +1043,8 @@ class SOCKETS {
 
         if (retval != 0) {
             log(
-                logfrom.c_str(), "getnameinfo: %s (%s:%d)",
-                gai_strerror(retval), __FILE__, __LINE__
+                "getnameinfo: %s (%s:%d)", gai_strerror(retval),
+                __FILE__, __LINE__
             );
 
             client_record->host[0] = '\0';
@@ -1052,13 +1065,11 @@ class SOCKETS {
                 int code = errno;
 
                 log(
-                    logfrom.c_str(), "epoll_ctl: %s (%s:%d)",
-                    strerror(code), __FILE__, __LINE__
+                    "epoll_ctl: %s (%s:%d)", strerror(code), __FILE__, __LINE__
                 );
             }
             else {
                 log(
-                    logfrom.c_str(),
                     "epoll_ctl: unexpected return value %d (%s:%d)",
                     retval, __FILE__, __LINE__
                 );
@@ -1091,7 +1102,7 @@ class SOCKETS {
 
             if (epoll_descriptor == NO_DESCRIPTOR) {
                 log(
-                    logfrom.c_str(), "%s: %s (%s:%d)", __FUNCTION__,
+                    "%s: %s (%s:%d)", __FUNCTION__,
                     "epoll record could not be created", __FILE__, __LINE__
                 );
 
@@ -1107,8 +1118,7 @@ class SOCKETS {
 
         if (!incoming || !outgoing) {
             log(
-                logfrom.c_str(), "new: out of memory (%s:%d)",
-                __FILE__, __LINE__
+                "new: out of memory (%s:%d)", __FILE__, __LINE__
             );
 
             if (incoming) delete incoming;
@@ -1170,7 +1180,7 @@ class SOCKETS {
 
             if (epoll_descriptor == NO_DESCRIPTOR) {
                 log(
-                    logfrom.c_str(), "%s: %s (%s:%d)", __FUNCTION__,
+                    "%s: %s (%s:%d)", __FUNCTION__,
                     "epoll record could not be created", __FILE__, __LINE__
                 );
 
@@ -1186,18 +1196,17 @@ class SOCKETS {
         if (descriptor == NO_DESCRIPTOR) return NO_DESCRIPTOR;
 
         int retval = ::listen(descriptor, SOMAXCONN);
+
         if (retval != 0) {
             if (retval == -1) {
                 int code = errno;
 
                 log(
-                    logfrom.c_str(), "listen: %s (%s:%d)", strerror(code),
-                    __FILE__, __LINE__
+                    "listen: %s (%s:%d)", strerror(code), __FILE__, __LINE__
                 );
             }
             else {
                 log(
-                    logfrom.c_str(),
                     "listen: unexpected return value %d (%s:%d)", retval,
                     __FILE__, __LINE__
                 );
@@ -1221,6 +1230,52 @@ class SOCKETS {
         set_flag(descriptor, FLAG::ACCEPT);
         set_flag(descriptor, FLAG::LISTENER);
 
+        record_type *record = find_record(descriptor);
+
+        if (record) {
+            struct sockaddr in_addr;
+            socklen_t in_len = sizeof(in_addr);
+
+            retval = getsockname(
+                descriptor, (struct sockaddr *)&in_addr, &in_len
+            );
+
+            if (retval != 0) {
+                if (retval == -1) {
+                    int code = errno;
+
+                    log(
+                        "getsockname: %s (%s:%d)", strerror(code),
+                        __FILE__, __LINE__
+                    );
+                }
+                else {
+                    log(
+                        "getsockname: unexpected return value %d (%s:%d)",
+                        retval, __FILE__, __LINE__
+                    );
+                }
+            }
+            else {
+                retval = getnameinfo(
+                    &in_addr, in_len,
+                    record->host.data(), socklen_t(record->host.size()),
+                    record->port.data(), socklen_t(record->port.size()),
+                    NI_NUMERICHOST|NI_NUMERICSERV
+                );
+
+                if (retval != 0) {
+                    log(
+                        "getnameinfo: %s (%s:%d)", gai_strerror(retval),
+                        __FILE__, __LINE__
+                    );
+
+                    record->host[0] = '\0';
+                    record->port[0] = '\0';
+                }
+            }
+        }
+
         return descriptor;
     }
 
@@ -1232,13 +1287,12 @@ class SOCKETS {
                 int code = errno;
 
                 log(
-                    logfrom.c_str(), "epoll_create1: %s (%s:%d)",
+                    "epoll_create1: %s (%s:%d)",
                     strerror(code), __FILE__, __LINE__
                 );
             }
             else {
                 log(
-                    logfrom.c_str(),
                     "epoll_create1: unexpected return value %d (%s:%d)",
                     epoll_descriptor, __FILE__, __LINE__
                 );
@@ -1255,8 +1309,7 @@ class SOCKETS {
 
         if (record->events == nullptr) {
             log(
-                logfrom.c_str(), "new: out of memory (%s:%d)",
-                __FILE__, __LINE__
+                "new: out of memory (%s:%d)", __FILE__, __LINE__
             );
 
             if (!close_and_deinit(epoll_descriptor)) {
@@ -1289,15 +1342,13 @@ class SOCKETS {
                 int code = errno;
 
                 log(
-                    logfrom.c_str(), "epoll_ctl: %s (%s:%d)", strerror(code),
-                    __FILE__, __LINE__
+                    "epoll_ctl: %s (%s:%d)", strerror(code), __FILE__, __LINE__
                 );
             }
             else {
                 log(
-                    logfrom.c_str(),
-                    "epoll_ctl: unexpected return value %d (%s:%d)",
-                    retval, __FILE__, __LINE__
+                    "epoll_ctl: unexpected return value %d (%s:%d)", retval,
+                    __FILE__, __LINE__
                 );
             }
 
@@ -1331,8 +1382,8 @@ class SOCKETS {
 
         if (retval != 0) {
             log(
-                logfrom.c_str(), "getaddrinfo: %s (%s:%d)",
-                gai_strerror(retval), __FILE__, __LINE__
+                "getaddrinfo: %s (%s:%d)", gai_strerror(retval),
+                __FILE__, __LINE__
             );
 
             goto CleanUp;
@@ -1349,8 +1400,7 @@ class SOCKETS {
                 int code = errno;
 
                 log(
-                    logfrom.c_str(), "socket: %s (%s:%d)", strerror(code),
-                    __FILE__, __LINE__
+                    "socket: %s (%s:%d)", strerror(code), __FILE__, __LINE__
                 );
 
                 continue;
@@ -1370,13 +1420,12 @@ class SOCKETS {
                         int code = errno;
 
                         log(
-                            logfrom.c_str(), "setsockopt: %s (%s:%d)",
-                            strerror(code), __FILE__, __LINE__
+                            "setsockopt: %s (%s:%d)", strerror(code),
+                            __FILE__, __LINE__
                         );
                     }
                     else {
                         log(
-                            logfrom.c_str(),
                             "setsockopt: unexpected return value %d (%s:%d)",
                             retval, __FILE__, __LINE__
                         );
@@ -1390,13 +1439,12 @@ class SOCKETS {
                             int code = errno;
 
                             log(
-                                logfrom.c_str(), "bind: %s (%s:%d)",
-                                strerror(code), __FILE__, __LINE__
+                                "bind: %s (%s:%d)", strerror(code),
+                                __FILE__, __LINE__
                             );
                         }
                         else {
                             log(
-                                logfrom.c_str(),
                                 "bind(%d, ?, %d) returned %d (%s:%d)",
                                 descriptor, next->ai_addrlen, retval,
                                 __FILE__, __LINE__
@@ -1414,13 +1462,12 @@ class SOCKETS {
                 if (retval == -1) {
                     int code = errno;
                     log(
-                        logfrom.c_str(), "sigprocmask: %s (%s:%d)",
-                        strerror(code), __FILE__, __LINE__
+                        "sigprocmask: %s (%s:%d)", strerror(code),
+                        __FILE__, __LINE__
                     );
                 }
                 else if (retval) {
                     log(
-                        logfrom.c_str(),
                         "sigprocmask: unexpected return value %d (%s:%d)",
                         retval, __FILE__, __LINE__
                     );
@@ -1449,14 +1496,13 @@ class SOCKETS {
                             }
                             else {
                                 log(
-                                    logfrom.c_str(), "connect: %s (%s:%d)",
-                                    strerror(code), __FILE__, __LINE__
+                                    "connect: %s (%s:%d)", strerror(code),
+                                    __FILE__, __LINE__
                                 );
                             }
                         }
                         else {
                             log(
-                                logfrom.c_str(),
                                 "connect(%d, ?, ?) returned %d (%s:%d)",
                                 descriptor, retval, __FILE__, __LINE__
                             );
@@ -1468,13 +1514,12 @@ class SOCKETS {
                     if (retval == -1) {
                         int code = errno;
                         log(
-                            logfrom.c_str(), "sigprocmask: %s (%s:%d)",
-                            strerror(code), __FILE__, __LINE__
+                            "sigprocmask: %s (%s:%d)", strerror(code),
+                            __FILE__, __LINE__
                         );
                     }
                     else if (retval) {
                         log(
-                            logfrom.c_str(),
                             "sigprocmask: unexpected return value %d (%s:%d)",
                             retval, __FILE__, __LINE__
                         );
@@ -1486,8 +1531,8 @@ class SOCKETS {
 
             if (!close_and_deinit(descriptor)) {
                 log(
-                    logfrom.c_str(), "failed to close descriptor %d (%s:%d)",
-                    descriptor, __FILE__, __LINE__
+                    "failed to close descriptor %d (%s:%d)", descriptor,
+                    __FILE__, __LINE__
                 );
 
                 pop(descriptor);
@@ -1507,7 +1552,7 @@ class SOCKETS {
 
         if (descriptor == NO_DESCRIPTOR) {
             log(
-                logfrom.c_str(), "unexpected descriptor %d (%s:%d)", descriptor,
+                "unexpected descriptor %d (%s:%d)", descriptor,
                 __FILE__, __LINE__
             );
 
@@ -1520,14 +1565,13 @@ class SOCKETS {
         if (retval == -1) {
             int code = errno;
             log(
-                logfrom.c_str(), "sigprocmask: %s (%s:%d)", strerror(code),
+                "sigprocmask: %s (%s:%d)", strerror(code),
                 __FILE__, __LINE__
             );
             return 0;
         }
         else if (retval) {
             log(
-                logfrom.c_str(),
                 "sigprocmask: unexpected return value %d (%s:%d)", retval,
                 __FILE__, __LINE__
             );
@@ -1543,13 +1587,12 @@ class SOCKETS {
                 int code = errno;
 
                 log(
-                    logfrom.c_str(), "close(%d): %s (%s:%d)",
+                    "close(%d): %s (%s:%d)",
                     descriptor, strerror(code), __FILE__, __LINE__
                 );
             }
             else {
                 log(
-                    logfrom.c_str(),
                     "close(%d): unexpected return value %d (%s:%d)",
                     descriptor, retval, __FILE__, __LINE__
                 );
@@ -1569,7 +1612,6 @@ class SOCKETS {
 
             if (!found) {
                 log(
-                    logfrom.c_str(),
                     "descriptor %d closed but record not found (%s:%d)",
                     descriptor, __FILE__, __LINE__
                 );
@@ -1599,13 +1641,12 @@ class SOCKETS {
                         if (retval == -1) {
                             int code = errno;
                             log(
-                                logfrom.c_str(), "close(%d): %s (%s:%d)", d,
+                                "close(%d): %s (%s:%d)", d,
                                 strerror(code), __FILE__, __LINE__
                             );
                         }
                         else if (retval != 0) {
                             log(
-                                logfrom.c_str(),
                                 "close(%d): unexpected return value %d (%s:%d)",
                                 d, retval, __FILE__, __LINE__
                             );
@@ -1615,7 +1656,6 @@ class SOCKETS {
 
                             if (record.descriptor == NO_DESCRIPTOR) {
                                 log(
-                                    logfrom.c_str(),
                                     "descriptor %d closed but record not found "
                                     "(%s:%d)", d, __FILE__, __LINE__
                                 );
@@ -1632,13 +1672,11 @@ class SOCKETS {
         if (retval == -1) {
             int code = errno;
             log(
-                logfrom.c_str(), "sigprocmask: %s (%s:%d)", strerror(code),
-                __FILE__, __LINE__
+                "sigprocmask: %s (%s:%d)", strerror(code), __FILE__, __LINE__
             );
         }
         else if (retval) {
             log(
-                logfrom.c_str(),
                 "sigprocmask: unexpected return value %d (%s:%d)", retval,
                 __FILE__, __LINE__
             );
@@ -1746,9 +1784,8 @@ class SOCKETS {
 
         if (!epoll_record) {
             log(
-                logfrom.c_str(), "%s: %s (%s:%d)", __FUNCTION__,
-                "epoll record could not be found", __FILE__,
-                __LINE__
+                "%s: %s (%s:%d)", __FUNCTION__,
+                "epoll record could not be found", __FILE__, __LINE__
             );
 
             return false;
@@ -1770,16 +1807,13 @@ class SOCKETS {
                 int code = errno;
 
                 log(
-                    logfrom.c_str(),
-                    "epoll_ctl: %s (%s:%d)", strerror(code),
-                    __FILE__, __LINE__
+                    "epoll_ctl: %s (%s:%d)", strerror(code), __FILE__, __LINE__
                 );
             }
             else {
                 log(
-                    logfrom.c_str(),
-                    "epoll_ctl: unexpected return value %d "
-                    "(%s:%d)", retval, __FILE__, __LINE__
+                    "epoll_ctl: unexpected return value %d (%s:%d)", retval,
+                    __FILE__, __LINE__
                 );
             }
 
@@ -1802,7 +1836,6 @@ class SOCKETS {
             }
             else {
                 log(
-                    logfrom.c_str(),
                     "Forbidden condition met (%s:%d).", __FILE__, __LINE__
                  );
             }
@@ -1848,8 +1881,7 @@ class SOCKETS {
             }
             else {
                 log(
-                    logfrom.c_str(), "flag buffer is full (%s:%d)",
-                    __FILE__, __LINE__
+                    "flag buffer is full (%s:%d)", __FILE__, __LINE__
                 );
 
                 return false;
@@ -1905,8 +1937,7 @@ class SOCKETS {
         return false;
     }
 
-    std::string logfrom;
-    void (*log)(const char *, const char *p_fmt, ...);
+    std::function<void(const char *text)> log_callback;
     std::unordered_map<int, size_t> groups;
     std::array<std::vector<record_type>, 1024> descriptors;
     std::array<
