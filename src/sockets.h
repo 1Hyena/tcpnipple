@@ -817,7 +817,7 @@ class SOCKETS {
                 if (count == -1) {
                     int code = errno;
 
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (code == EAGAIN || code == EWOULDBLOCK) {
                         return true;
                     }
 
