@@ -1,4 +1,27 @@
-// SPDX-License-Identifier: MIT
+////////////////////////////////////////////////////////////////////////////////
+// MIT License                                                                //
+//                                                                            //
+// Copyright (c) 2023 Erich Erstu                                             //
+//                                                                            //
+// Permission is hereby granted, free of charge, to any person obtaining a    //
+// copy of this software and associated documentation files (the "Software"), //
+// to deal in the Software without restriction, including without limitation  //
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,   //
+// and/or sell copies of the Software, and to permit persons to whom the      //
+// Software is furnished to do so, subject to the following conditions:       //
+//                                                                            //
+// The above copyright notice and this permission notice shall be included in //
+// all copies or substantial portions of the Software.                        //
+//                                                                            //
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR //
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,   //
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL    //
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER //
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING    //
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER        //
+// DEALINGS IN THE SOFTWARE.                                                  //
+////////////////////////////////////////////////////////////////////////////////
+
 #ifndef SOCKETS_H_05_01_2023
 #define SOCKETS_H_05_01_2023
 
@@ -13,6 +36,9 @@
 #include <string.h>
 #include <stdarg.h>
 #include <unistd.h>
+#include <cerrno>
+#include <limits>
+#include <cstdio>
 
 class SOCKETS {
     public:
@@ -21,23 +47,25 @@ class SOCKETS {
 
     enum class FLAG : uint8_t {
         NONE           =  0,
-        RECONNECT      =  1,
-        READ           =  2,
-        WRITE          =  3,
-        ACCEPT         =  4,
-        NEW_CONNECTION =  5,
-        DISCONNECT     =  6,
-        CLOSE          =  7,
-        INCOMING       =  8,
-        FROZEN         =  9,
-        MAY_SHUTDOWN   = 10,
-        LISTENER       = 11,
-        CONNECTING     = 12,
-        TRIED_IPV4     = 13,
-        TRIED_IPV6     = 14,
-        // Do not change the order of these flags:
-        EPOLL          = 15,
-        MAX_FLAGS      = 16
+        TIMEOUT        =  1,
+        // Do not change the order of the flags above this line.
+        RECONNECT      =  2,
+        READ           =  3,
+        WRITE          =  4,
+        ACCEPT         =  5,
+        NEW_CONNECTION =  6,
+        DISCONNECT     =  7,
+        CLOSE          =  8,
+        INCOMING       =  9,
+        FROZEN         = 10,
+        MAY_SHUTDOWN   = 11,
+        LISTENER       = 12,
+        CONNECTING     = 13,
+        TRIED_IPV4     = 14,
+        TRIED_IPV6     = 15,
+        // Do not change the order of the flags below this line.
+        EPOLL          = 16,
+        MAX_FLAGS      = 17
     };
 
     private:
@@ -277,8 +305,13 @@ class SOCKETS {
         }
     }
 
-    inline bool is_frozen(int descriptor) {
+    inline bool is_frozen(int descriptor) const {
         return has_flag(descriptor, FLAG::FROZEN);
+    }
+
+    inline bool idle() const {
+        const record_type *epoll_record = find_epoll_record();
+        return epoll_record ? has_flag(*epoll_record, FLAG::TIMEOUT) : false;
     }
 
     inline bool connect(
@@ -465,6 +498,10 @@ class SOCKETS {
                             // caller.
 
                             timeout = 0;
+                            // TODO: Find a better fix than setting the timeout
+                            // to zero. If we set it to zero, then we would get
+                            // unnecessary timeouts if clients disconnect.
+
                             continue;
                         }
 
@@ -501,6 +538,11 @@ class SOCKETS {
 
                         if (handle_read(d)) continue;
                         break;
+                    }
+                    case FLAG::TIMEOUT: {
+                        // This temporary flag is removed on each service cycle.
+                        // For that reason it should be handled before others.
+                        continue;
                     }
                     default: {
                         log(
@@ -622,8 +664,6 @@ class SOCKETS {
     }
 
     private:
-    static void drop_log(const char *, const char *, ...) {}
-
     inline bool handle_close(int descriptor) {
         bool success = true;
 
@@ -711,6 +751,9 @@ class SOCKETS {
             );
 
             return false;
+        }
+        else if (pending == 0) {
+            set_flag(epoll_descriptor, FLAG::TIMEOUT);
         }
 
         for (int i=0; i<pending; ++i) {
@@ -1759,8 +1802,8 @@ class SOCKETS {
         );
     }
 
-    inline record_type *find_epoll_record() {
-        record_type *epoll_record = nullptr;
+    inline const record_type *find_epoll_record() const {
+        const record_type *epoll_record = nullptr;
 
         static constexpr const size_t flag_index{
             static_cast<size_t>(FLAG::EPOLL)
@@ -1768,7 +1811,7 @@ class SOCKETS {
 
         for (size_t i=0, sz=flags[flag_index].size(); i<sz; ++i) {
             int epoll_descriptor = flags[flag_index][i].descriptor;
-            record_type *rec = find_record(epoll_descriptor);
+            const record_type *rec = find_record(epoll_descriptor);
 
             if (rec) {
                 epoll_record = rec;
@@ -1777,6 +1820,12 @@ class SOCKETS {
         }
 
         return epoll_record;
+    }
+
+    inline record_type *find_epoll_record() {
+        return const_cast<record_type *>(
+            static_cast<const SOCKETS &>(*this).find_epoll_record()
+        );
     }
 
     bool modify_epoll(int descriptor, uint32_t events) {
@@ -1917,24 +1966,25 @@ class SOCKETS {
         return true;
     }
 
-    bool has_flag(int descriptor, FLAG flag) const {
+    bool has_flag(const record_type &rec, const FLAG flag) const {
         size_t index = static_cast<size_t>(flag);
 
-        if (index > flags.size()) {
+        if (index >= rec.flags.size()) {
             return false;
         }
 
-        const record_type *rec = find_record(descriptor);
-
-        if (!rec) return false;
-
-        uint32_t pos = rec->flags[index];
+        uint32_t pos = rec.flags[index];
 
         if (pos != std::numeric_limits<uint32_t>::max()) {
             return true;
         }
 
         return false;
+    }
+
+    bool has_flag(int descriptor, const FLAG flag) const {
+        const record_type *rec = find_record(descriptor);
+        return rec ? has_flag(*rec, flag) : false;
     }
 
     std::function<void(const char *text)> log_callback;
