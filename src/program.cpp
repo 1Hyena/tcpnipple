@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "options.h"
 #include "program.h"
@@ -20,10 +21,6 @@ size_t PROGRAM::log_size = 0;
 bool   PROGRAM::log_time = false;
 
 void PROGRAM::run() {
-    static constexpr const int
-        supply_group = 1,
-        demand_group = 2;
-
     if (!options) return bug();
 
     if (options->exit_flag) {
@@ -31,27 +28,74 @@ void PROGRAM::run() {
         return;
     }
 
+    sockets->set_logger(
+        [](SOCKETS::SESSION session, const char *text) noexcept {
+            std::string line;
+            char time[20];
+
+            write_time(time, sizeof(time));
+            line.append(time).append(" :: ");
+
+            if (!session) {
+                line.append("Sockets: ");
+            }
+            else {
+                char buffer[20];
+                std::snprintf(buffer, 20, "#%06lx: ", session.id);
+                line.append(buffer);
+            }
+
+            const char *esc = "\x1B[0;31m";
+
+            switch (session.error) {
+                case SOCKETS::BAD_TIMING:    esc = "\x1B[1;33m"; break;
+                case SOCKETS::LIBRARY_ERROR: esc = "\x1B[1;31m"; break;
+                case SOCKETS::NO_ERROR:      esc = "\x1B[0;32m"; break;
+                default: break;
+            }
+
+            line.append(esc).append(text).append("\x1B[0m").append("\n");
+            print_text(stderr, line.c_str(), line.size());
+        }
+    );
+
     bool terminated = false;
     size_t total_connections = get_connection_count();
 
-    std::unordered_map<int, int> supply_map;
-    std::unordered_map<int, int> demand_map;
-    std::unordered_set<int> unmet_supply;
-    std::unordered_set<int> unmet_demand;
-    std::unordered_set<int> descriptors;
+    std::unordered_map<size_t, size_t> supply_map;
+    std::unordered_map<size_t, size_t> demand_map;
+    std::unordered_set<size_t> unmet_supply;
+    std::unordered_set<size_t> unmet_demand;
+    std::unordered_set<size_t> sessions;
+    std::unordered_set<size_t> suppliers;
+    std::unordered_set<size_t> demanders;
 
     bool connecting = false;
 
     for (size_t i=0; i<total_connections; ++i) {
-        connecting |= sockets->connect(
-            get_supply_host(), std::to_string(get_supply_port()).c_str(),
-            supply_group
-        );
+        SOCKETS::SESSION supplier{
+            sockets->connect(
+                get_supply_host(), std::to_string(get_supply_port()).c_str()
+            )
+        };
 
-        connecting |= sockets->connect(
-            get_demand_host(), std::to_string(get_demand_port()).c_str(),
-            demand_group
-        );
+        if (supplier.valid) {
+            suppliers.insert(supplier.id);
+            sessions.insert(supplier.id);
+        }
+
+        SOCKETS::SESSION demander{
+            sockets->connect(
+                get_demand_host(), std::to_string(get_demand_port()).c_str()
+            )
+        };
+
+        if (demander.valid) {
+            demanders.insert(demander.id);
+            sessions.insert(demander.id);
+        }
+
+        connecting = !supplier.error || !demander.error;
     }
 
     if (!total_connections) {
@@ -84,8 +128,6 @@ void PROGRAM::run() {
         );
     }
 
-    std::vector<uint8_t> buffer;
-
     do {
         signals->block();
         while (int sig = signals->next()) {
@@ -111,167 +153,167 @@ void PROGRAM::run() {
         signals->unblock();
 
         if (terminated) {
-            for (int d : descriptors) {
-                sockets->disconnect(d);
+            for (auto sid : sessions) {
+                sockets->disconnect(sid);
             }
 
             continue;
         }
 
-        if (!sockets->serve()) {
+        SOCKETS::ERROR next_error = sockets->next_error();
+        if (next_error != SOCKETS::NO_ERROR) {
             log("%s", "Error while serving sockets.");
             status = EXIT_FAILURE;
             terminated = true;
         }
 
-        int d = SOCKETS::NO_DESCRIPTOR;
-        while ((d = sockets->next_disconnection()) != SOCKETS::NO_DESCRIPTOR) {
-            int other = SOCKETS::NO_DESCRIPTOR;
-            int group = sockets->get_group(d);
+        SOCKETS::ALERT alert;
 
-            if (group == supply_group) {
-                log(
-                    "Supply descriptor %d has been disconnected from %s:%s.",
-                    d, sockets->get_host(d), sockets->get_port(d)
-                );
-            }
-            else if (group == demand_group) {
-                log(
-                    "Demand descriptor %d has been disconnected from %s:%s.",
-                    d, sockets->get_host(d), sockets->get_port(d)
-                );
-            }
-            else {
-                log(
-                    "Groupless descriptor %d has been disconnected from %s:%s.",
-                    d, sockets->get_host(d), sockets->get_port(d)
-                );
+        while ((alert = sockets->next_alert()).valid) {
+            const size_t sid = alert.session;
+            size_t other = 0;
 
-                // Should never happen.
-                terminated = true;
-            }
+            if (alert.event == SOCKETS::DISCONNECTION) {
+                if (suppliers.count(sid)) {
+                    log(
+                        "Supplier #%06lx has been disconnected from %s:%s.",
+                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                    );
 
-            descriptors.erase(d);
-
-            if (supply_map.count(d)) {
-                other = supply_map[d];
-                supply_map.erase(d);
-            }
-            else if (demand_map.count(d)) {
-                other = demand_map[d];
-                demand_map.erase(d);
-            }
-            else if (unmet_supply.count(d)) {
-                unmet_supply.erase(d);
-            }
-            else if (unmet_demand.count(d)) {
-                unmet_demand.erase(d);
-            }
-
-            if (other != SOCKETS::NO_DESCRIPTOR) {
-                if (supply_map.count(other)) {
-                    supply_map[other] = SOCKETS::NO_DESCRIPTOR;
+                    suppliers.erase(sid);
                 }
-                else if (demand_map.count(other)) {
-                    demand_map[other] = SOCKETS::NO_DESCRIPTOR;
-                }
+                else if (demanders.count(sid)) {
+                    log(
+                        "Demander #%06lx has been disconnected from %s:%s.",
+                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                    );
 
-                sockets->disconnect(other);
-            }
-            else if (descriptors.empty()) {
-                terminated = true;
-            }
-        }
-
-        while ((d = sockets->next_connection()) != SOCKETS::NO_DESCRIPTOR) {
-            int group = sockets->get_group(d);
-
-            descriptors.insert(d);
-
-            if (group == supply_group) {
-                log(
-                    "Supply descriptor %d has been connected to %s:%s.",
-                    d, sockets->get_host(d), sockets->get_port(d)
-                );
-
-                if (unmet_demand.empty()) {
-                    unmet_supply.insert(d);
-                    sockets->freeze(d);
+                    demanders.erase(sid);
                 }
                 else {
-                    int other = *(unmet_demand.begin());
-                    unmet_demand.erase(other);
-                    demand_map[other] = d;
-                    supply_map[d] = other;
-                    sockets->unfreeze(other);
+                    log(
+                        "Stranger #%06lx  has been disconnected from %s:%s.",
+                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                    );
+
+                    // Should never happen.
+                    terminated = true;
+                }
+
+                sessions.erase(sid);
+
+                if (supply_map.count(sid)) {
+                    other = supply_map[sid];
+                    supply_map.erase(sid);
+                }
+                else if (demand_map.count(sid)) {
+                    other = demand_map[sid];
+                    demand_map.erase(sid);
+                }
+                else if (unmet_supply.count(sid)) {
+                    unmet_supply.erase(sid);
+                }
+                else if (unmet_demand.count(sid)) {
+                    unmet_demand.erase(sid);
+                }
+
+                if (other) {
+                    if (supply_map.count(other)) {
+                        supply_map[other] = 0;
+                    }
+                    else if (demand_map.count(other)) {
+                        demand_map[other] = 0;
+                    }
+
+                    sockets->disconnect(other);
+                }
+                else if (sessions.empty()) {
+                    terminated = true;
                 }
             }
-            else if (group == demand_group) {
-                log(
-                    "Demand descriptor %d has been connected to %s:%s.",
-                    d, sockets->get_host(d), sockets->get_port(d)
-                );
+            else if (alert.event == SOCKETS::CONNECTION) {
+                if (suppliers.count(sid)) {
+                    log(
+                        "Supplier #%06lx has been connected to %s:%s.",
+                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                    );
 
-                if (unmet_supply.empty()) {
-                    unmet_demand.insert(d);
-                    sockets->freeze(d);
+                    if (unmet_demand.empty()) {
+                        unmet_supply.insert(sid);
+                        sockets->freeze(sid);
+                    }
+                    else {
+                        other = *(unmet_demand.begin());
+                        unmet_demand.erase(other);
+                        demand_map[other] = sid;
+                        supply_map[sid] = other;
+                        sockets->unfreeze(other);
+                    }
+                }
+                else if (demanders.count(sid)) {
+                    log(
+                        "Demander #%06lx has been connected to %s:%s.",
+                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                    );
+
+                    if (unmet_supply.empty()) {
+                        unmet_demand.insert(sid);
+                        sockets->freeze(sid);
+                    }
+                    else {
+                        other = *(unmet_supply.begin());
+                        unmet_supply.erase(other);
+                        supply_map[other] = sid;
+                        demand_map[sid] = other;
+                        sockets->unfreeze(other);
+                    }
                 }
                 else {
-                    int other = *(unmet_supply.begin());
-                    unmet_supply.erase(other);
-                    supply_map[other] = d;
-                    demand_map[d] = other;
-                    sockets->unfreeze(other);
+                    log(
+                        "Stranger #%06lx has been connected to %s:%s.",
+                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                    );
+
+                    // Should never happen.
+                    terminated = true;
                 }
             }
-            else {
-                log(
-                    "Groupless descriptor %d has been connected to %s:%s.",
-                    d, sockets->get_host(d), sockets->get_port(d)
-                );
+            else if (alert.event == SOCKETS::INCOMING) {
+                size_t forward_to = 0;
 
-                // Should never happen.
-                terminated = true;
+                if (supply_map.count(sid)) {
+                    forward_to = supply_map[sid];
+                }
+                else if (demand_map.count(sid)) {
+                    forward_to = demand_map[sid];
+                }
+
+                if (forward_to) {
+                    const size_t size = sockets->get_incoming_size(sid);
+                    const char *data = sockets->read(sid);
+
+                    if (is_verbose()) {
+                        log(
+                            "%lu byte%s from %s:%s %s sent to %s:%s.",
+                            size, size == 1 ? "" : "s",
+                            sockets->get_host(sid), sockets->get_port(sid),
+                            size == 1 ? "is" : "are",
+                            sockets->get_host(forward_to),
+                            sockets->get_port(forward_to)
+                        );
+                    }
+
+                    sockets->write(forward_to, data, size);
+                }
             }
         }
 
         if (supply_map.empty() && demand_map.empty()) {
-            if (sockets->get_group_size(demand_group) == 0
-            ||  sockets->get_group_size(supply_group) == 0) {
+            if (demanders.empty() || suppliers.empty()) {
                 terminated = true;
             }
 
             continue;
-        }
-
-        while ((d = sockets->next_incoming()) != SOCKETS::NO_DESCRIPTOR) {
-            sockets->swap_incoming(d, buffer);
-
-            int forward_to = SOCKETS::NO_DESCRIPTOR;
-
-            if (supply_map.count(d)) {
-                forward_to = supply_map[d];
-            }
-            else if (demand_map.count(d)) {
-                forward_to = demand_map[d];
-            }
-
-            if (forward_to != SOCKETS::NO_DESCRIPTOR) {
-                if (is_verbose()) {
-                    log(
-                        "%lu byte%s from %s:%s %s sent to %s:%s.",
-                        buffer.size(), buffer.size() == 1 ? "" : "s",
-                        sockets->get_host(d), sockets->get_port(d),
-                        buffer.size() == 1 ? "is" : "are",
-                        sockets->get_host(forward_to),
-                        sockets->get_port(forward_to)
-                    );
-                }
-
-                sockets->append_outgoing(forward_to, buffer);
-            }
-
-            buffer.clear();
         }
     }
     while (!terminated);
@@ -297,11 +339,7 @@ bool PROGRAM::init(int argc, char **argv) {
     sockets = new (std::nothrow) SOCKETS();
     if (!sockets) return false;
 
-    return sockets->init(
-        [&](const char *txt) {
-            print_log("Sockets", "%s", txt);
-        }
-    );
+    return sockets->init();
 }
 
 int PROGRAM::deinit() {
@@ -358,6 +396,18 @@ bool PROGRAM::print_text(FILE *fp, const char *text, size_t len) {
     return true;
 }
 
+void PROGRAM::write_time(char *buffer, size_t length) {
+    struct timeval timeofday;
+    gettimeofday(&timeofday, nullptr);
+
+    time_t timestamp = (time_t) timeofday.tv_sec;
+    struct tm *tm_ptr = gmtime(&timestamp);
+
+    if (!strftime(buffer, length, "%Y-%m-%d %H:%M:%S", tm_ptr)) {
+        buffer[0] = '\0';
+    }
+}
+
 void PROGRAM::print_log(const char *origin, const char *p_fmt, ...) {
     va_list ap;
     char *buf = nullptr;
@@ -390,16 +440,7 @@ void PROGRAM::print_log(const char *origin, const char *p_fmt, ...) {
 
     if (PROGRAM::log_time) {
         char timebuf[20];
-        struct timeval timeofday;
-        gettimeofday(&timeofday, nullptr);
-
-        time_t timestamp = (time_t) timeofday.tv_sec;
-        struct tm *tm_ptr = gmtime(&timestamp);
-
-        if (!strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm_ptr)) {
-            timebuf[0] = '\0';
-        }
-
+        write_time(timebuf, sizeof(timebuf));
         logline.append(timebuf);
         logline.append(" :: ");
     }

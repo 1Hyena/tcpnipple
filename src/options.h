@@ -5,6 +5,7 @@
 #include <string>
 #include <limits>
 #include <getopt.h>
+#include <cstdint>
 
 class OPTIONS {
     public:

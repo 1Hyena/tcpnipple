@@ -4,6 +4,7 @@
 
 #include <string>
 #include <sys/time.h>
+#include <cstdint>
 
 class PROGRAM {
     public:
@@ -45,6 +46,7 @@ class PROGRAM {
 
     private:
     static bool print_text(FILE *fp, const char *text, size_t length);
+    static void write_time(char *buffer, size_t length);
 
     std::string    pname;
     std::string    pver;
