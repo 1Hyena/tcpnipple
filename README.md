@@ -1,4 +1,4 @@
-# TcpNipple v1.14
+# TCP Nipple v1.15
 This Linux program is a proxy client that joins together pairs of outgoing TCP
 connections. It connects simultaneously to two hosts (_supply_ and _demand_) and
 exchanges data between them.
