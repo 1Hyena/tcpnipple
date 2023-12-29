@@ -321,7 +321,11 @@ void PROGRAM::run() {
                     const size_t size = sockets->get_incoming_size(sid);
                     const char *data = sockets->peek(sid);
 
-                    if (!sockets->write(forward_to, data, size)) {
+                    SOCKETS::ERROR error{
+                        sockets->write(forward_to, data, size)
+                    };
+
+                    if (!error) {
                         sockets->read(sid);
 
                         if (is_verbose()) {
@@ -339,13 +343,14 @@ void PROGRAM::run() {
                     }
                     else {
                         log(
-                            "Failed to send %lu byte%s from %s#%06lx%s to "
-                            "%s#%06lx%s.",
+                            "%lu byte%s from %s#%06lx%s %s not sent to "
+                            "%s#%06lx%s (%s).",
                             size, size == 1 ? "" : "s",
                             supply_map.count(sid) ? ansi_G : ansi_R, sid,
                             ansi_x,
+                            size == 1 ? "is" : "are",
                             supply_map.count(forward_to) ? ansi_G : ansi_R,
-                            forward_to, ansi_x
+                            forward_to, ansi_x, sockets->to_string(error)
                         );
 
                         sockets->disconnect(forward_to);
