@@ -41,7 +41,7 @@
 
 class SOCKETS final {
     public:
-    static constexpr const char *const VERSION = "1.01";
+    static constexpr const char *const VERSION = "1.02";
 
     enum class ERROR : uint8_t {
         NONE = 0,
@@ -902,7 +902,7 @@ SOCKETS::ERROR SOCKETS::set_intake(
 
     return fuse() ? report(
         make_session(sid, ERROR::BAD_REQUEST),
-        "session %lu not found (%s:%d)", sid, file, line
+        "session not found (%s:%d)", file, line
     ) : ERROR::BAD_REQUEST;
 }
 
@@ -4906,7 +4906,6 @@ SOCKETS::RESULT SOCKETS::call_bind(
             case ENOTSOCK: //______ Descriptor sockfd does not refer to a socket
             case EINVAL: //___________ The socket is already bound to an address
             case EBADF: //____________ Descriptor is not a valid file descriptor
-            case EADDRINUSE: //_____________ The given address is already in use
             {
                 error = ERROR::LIBRARY;
                 break;
@@ -4918,6 +4917,7 @@ SOCKETS::RESULT SOCKETS::call_bind(
             case EADDRNOTAVAIL: //__________ Nonexistent interface was requested
             case EACCES: //__ Address is protected and user is not the superuser
             case ENAMETOOLONG: //___________________________ Address is too long
+            case EADDRINUSE: //_____________ The given address is already in use
             {
                 error = ERROR::SYSTEM;
                 break;
