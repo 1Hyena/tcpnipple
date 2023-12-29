@@ -3,7 +3,7 @@
 
 int main(int argc, char **argv) {
     int exit_status = EXIT_FAILURE;
-    PROGRAM program(argv[0], "1.15");
+    PROGRAM program(argv[0], "1.16");
 
     if (program.init(argc, argv)) {
         program.run();

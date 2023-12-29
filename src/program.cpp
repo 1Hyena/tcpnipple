@@ -21,6 +21,11 @@ size_t PROGRAM::log_size = 0;
 bool   PROGRAM::log_time = false;
 
 void PROGRAM::run() {
+    static constexpr const char
+        *ansi_G = "\x1B[1;32m",
+        *ansi_R = "\x1B[1;31m",
+        *ansi_x = "\x1B[0m";
+
     if (!options) return bug();
 
     if (options->exit_flag) {
@@ -95,7 +100,7 @@ void PROGRAM::run() {
             sessions.insert(demander.id);
         }
 
-        connecting = !supplier.error || !demander.error;
+        connecting = !supplier.error && !demander.error;
     }
 
     if (!total_connections) {
@@ -106,7 +111,7 @@ void PROGRAM::run() {
             log_time = true;
 
             log(
-                "No connections are to be made between %s:%d and %s:%d.",
+                "Opening no links from %s:%d to %s:%d.",
                 get_supply_host(), int(get_supply_port()),
                 get_demand_host(), int(get_demand_port())
             );
@@ -121,11 +126,22 @@ void PROGRAM::run() {
         log_time = true;
 
         log(
-            "Creating %lu connection%s between %s:%d and %s:%d.",
+            "Opening %lu link%s from %s:%d to %s:%d.",
             total_connections, total_connections == 1 ? "" : "s",
             get_supply_host(), int(get_supply_port()),
             get_demand_host(), int(get_demand_port())
         );
+
+        for (size_t sid : sessions) {
+            log(
+                "Session %s#%06lx%s provides %s from %s:%s.",
+                suppliers.count(sid) ? ansi_G :
+                demanders.count(sid) ? ansi_R : "", sid, ansi_x,
+                suppliers.count(sid) ? "supply" :
+                demanders.count(sid) ? "demand" : "nothing",
+                sockets->get_host(sid), sockets->get_port(sid)
+            );
+        }
     }
 
     do {
@@ -162,7 +178,10 @@ void PROGRAM::run() {
 
         SOCKETS::ERROR next_error = sockets->next_error();
         if (next_error != SOCKETS::NO_ERROR) {
-            log("%s", "Error while serving sockets.");
+            log(
+                "Error while serving sockets (%s).",
+                sockets->to_string(next_error)
+            );
             status = EXIT_FAILURE;
             terminated = true;
         }
@@ -176,24 +195,23 @@ void PROGRAM::run() {
             if (alert.event == SOCKETS::DISCONNECTION) {
                 if (suppliers.count(sid)) {
                     log(
-                        "Supplier #%06lx has been disconnected from %s:%s.",
-                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                        "Supply provider %s#%06lx%s has been disconnected.",
+                        ansi_G, sid, ansi_x
                     );
 
                     suppliers.erase(sid);
                 }
                 else if (demanders.count(sid)) {
                     log(
-                        "Demander #%06lx has been disconnected from %s:%s.",
-                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                        "Demand provider %s#%06lx%s has been disconnected.",
+                        ansi_R, sid, ansi_x
                     );
 
                     demanders.erase(sid);
                 }
                 else {
                     log(
-                        "Stranger #%06lx  has been disconnected from %s:%s.",
-                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                        "Strange session #%06lx has been disconnected.", sid
                     );
 
                     // Should never happen.
@@ -234,8 +252,8 @@ void PROGRAM::run() {
             else if (alert.event == SOCKETS::CONNECTION) {
                 if (suppliers.count(sid)) {
                     log(
-                        "Supplier #%06lx has been connected to %s:%s.",
-                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                        "Session %s#%06lx%s is now ready to provide supply.",
+                        ansi_G, sid, ansi_x
                     );
 
                     if (unmet_demand.empty()) {
@@ -248,12 +266,17 @@ void PROGRAM::run() {
                         demand_map[other] = sid;
                         supply_map[sid] = other;
                         sockets->unfreeze(other);
+
+                        log(
+                            "Sessions %s#%06lx%s and %s#%06lx%s are now fused.",
+                            ansi_G, sid, ansi_x, ansi_R, other, ansi_x
+                        );
                     }
                 }
                 else if (demanders.count(sid)) {
                     log(
-                        "Demander #%06lx has been connected to %s:%s.",
-                        sid, sockets->get_host(sid), sockets->get_port(sid)
+                        "Session %s#%06lx%s is now ready to provide demand.",
+                        ansi_R, sid, ansi_x
                     );
 
                     if (unmet_supply.empty()) {
@@ -266,11 +289,16 @@ void PROGRAM::run() {
                         supply_map[other] = sid;
                         demand_map[sid] = other;
                         sockets->unfreeze(other);
+
+                        log(
+                            "Sessions %s#%06lx%s and %s#%06lx%s are now fused.",
+                            ansi_R, sid, ansi_x, ansi_G, other, ansi_x
+                        );
                     }
                 }
                 else {
                     log(
-                        "Stranger #%06lx has been connected to %s:%s.",
+                        "Session #%06lx of %s:%s exists for no reason.",
                         sid, sockets->get_host(sid), sockets->get_port(sid)
                     );
 
@@ -283,6 +311,7 @@ void PROGRAM::run() {
 
                 if (supply_map.count(sid)) {
                     forward_to = supply_map[sid];
+
                 }
                 else if (demand_map.count(sid)) {
                     forward_to = demand_map[sid];
@@ -290,20 +319,38 @@ void PROGRAM::run() {
 
                 if (forward_to) {
                     const size_t size = sockets->get_incoming_size(sid);
-                    const char *data = sockets->read(sid);
+                    const char *data = sockets->peek(sid);
 
-                    if (is_verbose()) {
-                        log(
-                            "%lu byte%s from %s:%s %s sent to %s:%s.",
-                            size, size == 1 ? "" : "s",
-                            sockets->get_host(sid), sockets->get_port(sid),
-                            size == 1 ? "is" : "are",
-                            sockets->get_host(forward_to),
-                            sockets->get_port(forward_to)
-                        );
+                    if (!sockets->write(forward_to, data, size)) {
+                        sockets->read(sid);
+
+                        if (is_verbose()) {
+                            log(
+                                "%lu byte%s from %s#%06lx%s %s sent to "
+                                "%s#%06lx%s.",
+                                size, size == 1 ? "" : "s",
+                                supply_map.count(sid) ? ansi_G : ansi_R, sid,
+                                ansi_x,
+                                size == 1 ? "is" : "are",
+                                supply_map.count(forward_to) ? ansi_G : ansi_R,
+                                forward_to, ansi_x
+                            );
+                        }
                     }
+                    else {
+                        log(
+                            "Failed to send %lu byte%s from %s#%06lx%s to "
+                            "%s#%06lx%s.",
+                            size, size == 1 ? "" : "s",
+                            supply_map.count(sid) ? ansi_G : ansi_R, sid,
+                            ansi_x,
+                            supply_map.count(forward_to) ? ansi_G : ansi_R,
+                            forward_to, ansi_x
+                        );
 
-                    sockets->write(forward_to, data, size);
+                        sockets->disconnect(forward_to);
+                        sockets->disconnect(sid);
+                    }
                 }
             }
         }
